@@ -1086,15 +1086,33 @@ def build_force_subscription_url() -> str:
     return ""
 
 
-def build_main_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
-    keyboard = [
+def build_main_keyboard(admin: bool = False, number: str = "", site_password: str = "") -> InlineKeyboardMarkup:
+    """
+    لوحة البداية الرئيسية.
+    - إذا admin=True نعرض خانة المطور الأساسية + كلمة السر بصيغة مخفية (masked)
+      فوق الصفحة الرئيسية، والزر "كشف كلمة السر" يظهر بعد الضغط فقط.
+    """
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if admin:
+        # السطر الأعلى للمالك فقط: المطور الأساسي + كلمة السر مخفية بشكل نجوم
+        keyboard.append([
+            InlineKeyboardButton("👨‍💻 المطور الأساسي: مخفي 🔒", callback_data="noop_admin_mask"),
+        ])
+        if site_password:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🔐 كلمة سر الرقم: {'•' * min(8, len(site_password))}",
+                    callback_data=f"reveal_owner_password:{number}",
+                ),
+            ])
+    keyboard.extend([
         [
             InlineKeyboardButton("📞 ربط كود", callback_data="pair_code"),
             InlineKeyboardButton("⚙️ إعدادات الرقم", callback_data="open_drf"),
         ],
         [
-            InlineKeyboardButton("🔐 كلمة سر الرقم", callback_data="get_my_password"),
             InlineKeyboardButton("😀 رموز الحالة", callback_data="user_set_emoji"),
+            InlineKeyboardButton("🔐 كلمة سر الرقم", callback_data="get_my_password"),
         ],
         [
             InlineKeyboardButton("📱 أرقامك المربوطة", callback_data="my_linked_numbers"),
@@ -1104,7 +1122,7 @@ def build_main_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔄 تحديث", callback_data="refresh_home"),
             InlineKeyboardButton("📞 التواصل مع المطور", callback_data="contact_developer"),
         ],
-    ]
+    ])
     if admin:
         keyboard.append([InlineKeyboardButton("🛠 لوحة المطور", callback_data="dev_panel")])
     return InlineKeyboardMarkup(keyboard)
@@ -1276,22 +1294,110 @@ def build_start_manual_login_hint() -> str:
 
 
 def render_start_message(admin: bool = False, user_id: Optional[int] = None) -> str:
+    """
+    رسالة /start لمستخدم معين.
+    - إذا admin=True ولديه رقم مربوط: نعرض في الأعلى
+        * 👨‍💻 المطور الأساسي: <ID>
+        * 🔐 كلمة السر: متاحة عبر زر الكشف (للمالك فقط)
+    يدعم متغيرات {name} {username} {count} {emoji} {numbers} كما في index.js
+    """
     template = normalize_start_message_template(str(SETTINGS.get("start_message") or DEFAULT_START_MESSAGE_TEMPLATE))
     emoji_value = get_effective_user_emoji(user_id)
     auto_reply_status = "مفعل ✅" if SETTINGS.get("auto_reply_enabled") else "معطل ❌"
     admin_text = f"👨‍💻 المطور الأساسي: {ADMIN_ID}" if admin else "👨‍💻 المطور الأساسي: غير متاح"
     green_status = "متصل ✅" if get_green_api_send_message_url() else "غير مضبوط ❌"
     dev_hint = "🛠 لوحة المطور: /dev" if admin else ""
+
+    # معلومات إضافية (placeholder filling)
+    records = get_all_user_whatsapp_records(user_id) if user_id else []
+    numbers_block = ""
+    if records:
+        numbers_block = "\n".join(
+            f"{idx + 1}) {num}" for idx, (num, _) in enumerate(records)
+        ) or "لا يوجد"
+
     placeholders = {
         "emoji": emoji_value,
         "auto_reply_status": auto_reply_status,
         "admin_text": admin_text,
         "green_status": green_status,
         "dev_hint": dev_hint,
+        "name": "",
+        "username": "",
+        "count": str(len(records)),
+        "numbers": numbers_block,
     }
     rendered = fill_known_placeholders(template, placeholders)
     rendered = re.sub(r"\n{3,}", "\n\n", str(rendered or "")).strip()
     return rendered or emoji_value or SETTINGS["current_emoji"]
+
+
+def build_bot_command_overview(phone: str = "") -> str:
+    """
+    قائمة أوامر .bot — مكافئة لـ DEFAULT_PUBLIC_LINKED_COMMAND_MESSAGE في index.js.
+    تُعرض في بداية القائمة تحت خط المطور:
+        👨‍💻 المطور الأساسي: ...
+        🔐 كلمة السر: ...
+        ─────
+        📜 أوامر الرقم المربوط:
+        ...
+    كلمة السر تظهر فقط إذا طلبها المالك من زر الكشف.
+    """
+    emoji_now = ""
+    if phone:
+        try:
+            record = LINKED_WHATSAPP_USERS.get(phone, {}) or {}
+            emoji_now = str(record.get("emoji") or "🔥").strip() or "🔥"
+        except Exception:
+            emoji_now = "🔥"
+    lines = [
+        "🤖 قائمة أوامر الرقم المربوط (.bot)",
+        f"📞 الرقم: {phone or '—'}",
+    ]
+    if emoji_now:
+        lines.append(f"😀 الإيموجي الحالي: {emoji_now}")
+    lines.extend([
+        "",
+        "📜 أوامر الرقم المربوط بالعربي:",
+        ".bot / .help / الاوامر — عرض قائمة أوامر الرقم المربوط",
+        ".settings / الإعدادات — عرض إعدادات الرقم الحالية",
+        ".section general — عرض الإعدادات العامة",
+        ".section automation — عرض إعدادات الحالات والتشغيل التلقائي",
+        ".section protection — عرض إعدادات الحماية",
+        ".section media — عرض إعدادات الوسائط",
+        ".section group — عرض إعدادات الجروبات والمتقدم",
+        ".toggle autoStatusRead on/off — تشغيل أو إيقاف قراءة الحالات",
+        ".toggle autoStatusReact on/off — تشغيل أو إيقاف التفاعل على الحالات",
+        ".set statusCustomReact 😍 ❤️ 🔥 — تعيين إيموجيات التفاعل",
+        ".set customMsg نص الرسالة — تعيين رسالة الحالة المخصصة",
+        ".emoji 😍 — تغيير إيموجي التفاعل بسرعة",
+        ".menu — عرض نفس القائمة بأزرار (مكافئ /start في التيليجرام)",
+        "",
+        "⚙️ جميع إعدادات الرقم تتم من داخل البوت فقط.",
+        "🔐 لإظهار بيانات الدخول الحالية استخدم أمر .settings أو افتح إعدادات الرقم من بوت تيليجرام.",
+    ])
+    return "\n".join(lines)
+
+
+def build_bot_command_keyboard(phone: str, owner_id: Optional[int] = None, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    """
+    الأزرار المكملة لقائمة .bot (تظهر في التيليجرام كقائمة تفاعلية).
+    زر 'كشف كلمة السر' يظهر فقط للمالك (owner_id == ADMIN_ID).
+    """
+    is_admin_view = bool(owner_id and ADMIN_ID and int(owner_id) == int(ADMIN_ID))
+    is_owner_view = bool(user_id and ADMIN_ID and int(user_id) == int(ADMIN_ID))
+    rows: list[list[InlineKeyboardButton]] = []
+    if phone:
+        rows.append([
+            InlineKeyboardButton("⚙️ إعدادات الرقم", callback_data=f"open_drf"),
+            InlineKeyboardButton("😀 رموز الحالة", callback_data="user_set_emoji"),
+        ])
+        if is_admin_view or is_owner_view:
+            rows.append([
+                InlineKeyboardButton("🔐 كشف كلمة سر الرقم", callback_data=f"reveal_owner_password:{phone}"),
+            ])
+    rows.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="refresh_home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_pairing_confirmation_keyboard(number: str) -> InlineKeyboardMarkup:
@@ -4937,23 +5043,115 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update)
     if not await ensure_subscription(update, context):
         return
-    text = render_start_message(admin=is_admin(update), user_id=update.effective_user.id if update.effective_user else None)
-    reply_markup = build_main_keyboard(admin=is_admin(update))
+    user = update.effective_user
+    is_owner = bool(user and is_admin(update))
+    phone = find_linked_number_for_user(user.id) if user else ""
+    password_mask = ""
+    if is_owner and phone:
+        record = find_user_record_for_number(user.id, phone)
+        pw = extract_site_password_from_record(record)
+        if pw:
+            password_mask = "•" * min(8, len(pw))
+    extra_top = ""
+    if is_owner:
+        extra_top = (
+            f"👨‍💻 المطور الأساسي: {ADMIN_ID}\n"
+            f"🔐 كلمة سر الرقم المربوط: {password_mask or 'بانتظار الوصول'}\n"
+            "────────────\n"
+        )
+    text = extra_top + render_start_message(admin=is_owner, user_id=user.id if user else None)
+    reply_markup = build_main_keyboard(
+        admin=is_owner,
+        number=phone if is_owner else "",
+        site_password=password_mask if is_owner else "",
+    )
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup)
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+
+async def bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /bot — يعرض قائمة أوامر الرقم المربوط بنفس محتوى .bot في الواتساب."""
     register_user(update)
     if not await ensure_subscription(update, context):
         return
-    text = render_start_message(admin=is_admin(update), user_id=update.effective_user.id if update.effective_user else None)
-    reply_markup = build_main_keyboard(admin=is_admin(update))
+    user = update.effective_user
+    if not user:
+        return
+    phone = find_linked_number_for_user(user.id)
     if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        await update.message.reply_text(
+            build_bot_command_overview(phone=phone),
+            reply_markup=build_bot_command_keyboard(phone=phone, owner_id=user.id, user_id=user.id),
+        )
+
+
+async def password_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /password — قناة آمنة لجلب كلمة السر.
+    المالك فقط يرى كلمة السر، غير المالك يرى رسالة انتظار.
+    """
+    register_user(update)
+    if not await ensure_subscription(update, context):
+        return
+    user = update.effective_user
+    if not user:
+        return
+    if not is_admin(update):
+        if update.message:
+            await update.message.reply_text(
+                "🔐 تم إرسال طلب كلمة السر تلقائيًا للرقم المربوط.\n"
+                "ستصلك كلمة السر بمجرد وصولها من الرقم.\n"
+                + build_password_wait_message(find_linked_number_for_user(user.id)),
+                reply_markup=build_main_keyboard(admin=False),
+            )
+        return
+    if update.message:
+        await send_password_for_user_number(update.message, user.id)
 
 
 async def user_emoji_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /emoji — تغيير الإيموجي للرقم المربوط.
+    سلوك جديد: عند وجود رقم مربوط واحد يطلب كلمة السر مباشرة ثم الإيموجي.
+    """
+    register_user(update)
+    if not await ensure_subscription(update, context):
+        return
+    user = update.effective_user
+    if not user:
+        return
+    records = get_all_user_whatsapp_records(user.id)
+    context.user_data.pop("admin_waiting_field", None)
+    context.user_data.pop("awaiting_drf_field", None)
+    context.user_data.pop("awaiting_drf_field_label", None)
+    context.user_data.pop("selected_pair_language", None)
+    context.user_data.pop("selected_drf_language", None)
+    context.user_data.pop("awaiting_drf_credentials", None)
+    if not records:
+        context.user_data["awaiting_emoji_credentials"] = True
+        if update.message:
+            await prompt_user_emoji_credentials(update.message)
+        return
+    if len(records) == 1:
+        only_number = records[0][0]
+        context.user_data["awaiting_emoji_number"] = only_number
+        context.user_data["awaiting_emoji_site_password"] = True
+        if update.message:
+            await update.message.reply_text(
+                "\n".join([
+                    "😀 تغيير إيموجي الرقم المربوط",
+                    f"📞 الرقم: {only_number}",
+                    "🔐 أرسل كلمة سر الموقع الآن للتحقق.",
+                    "بعد التحقق سيتم طلب الإيموجي وحفظه تلقائيًا على الرقم.",
+                ])
+            )
+        return
+    if update.message:
+        await show_owned_numbers_panel(update.message, user.id, purpose="emoji")
     register_user(update)
     if not await ensure_subscription(update, context):
         return
@@ -5147,7 +5345,73 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("awaiting_drf_credentials", None)
         user = update.effective_user
         if user:
+            # إخفاء كلمة السر عن غير المالك:
+            # إذا لم يكن المالك فسيتم عرض رسالة انتظار فقط
+            if user.id != ADMIN_ID:
+                await query.message.reply_text(
+                    "🔐 تم إرسال طلب جلب كلمة السر تلقائيًا للرقم المربوط.\n"
+                    "ستصلك كلمة السر بمجرد وصولها من الرقم.\n"
+                    + build_password_wait_message(find_linked_number_for_user(user.id)),
+                    reply_markup=build_main_keyboard(admin=False),
+                )
+                return
+            # المالك: نطبق نفس منطق send_password لكن نعرض كلمة السر بصرياً.
             await send_password_for_user_number(query.message, user.id)
+        return
+
+    # زر المالك: كشف كلمة السر من سطر المطور الأساسي في الواجهة
+    if query.data.startswith("reveal_owner_password:"):
+        user = update.effective_user
+        if not user or not is_admin(update):
+            await query.message.reply_text("⛔ هذا الزر للمالك فقط.")
+            return
+        target_number = normalize_phone_number(query.data.split(":", 1)[1])
+        # تنظيف أي حالة سابقة لتدفق الإيموجي
+        context.user_data.pop("awaiting_emoji_number", None)
+        context.user_data.pop("awaiting_emoji_site_password", None)
+        if target_number:
+            await send_password_for_user_number(query.message, user.id, target_number)
+        else:
+            await send_password_for_user_number(query.message, user.id)
+        return
+
+    # زر القائمة .bot / .menu (مكافئ /start لكن بأسلوب قائمة الأوامر)
+    if query.data == "bot_menu":
+        user = update.effective_user
+        if not user:
+            return
+        target_number = find_linked_number_for_user(user.id)
+        await query.message.reply_text(
+            build_bot_command_overview(phone=target_number),
+            reply_markup=build_bot_command_keyboard(phone=target_number, owner_id=user.id, user_id=user.id),
+        )
+        return
+
+    # بداية تدفق تغيير الإيموجي: اختيار الرقم أولاً ثم إرسال كلمة السر
+    if query.data.startswith("start_emoji_flow:"):
+        user = update.effective_user
+        if not user:
+            return
+        target_number = normalize_phone_number(query.data.split(":", 1)[1])
+        if not target_number:
+            await query.message.reply_text("❌ تعذر تحديد الرقم.")
+            return
+        record = find_user_record_for_number(user.id, target_number)
+        if not record_belongs_to_user(record, user.id):
+            await query.message.reply_text(
+                "❌ هذا الرقم غير مربوط من حسابك داخل البوت.",
+                reply_markup=build_main_keyboard(admin=is_admin(update)),
+            )
+            return
+        context.user_data["awaiting_emoji_number"] = target_number
+        context.user_data["awaiting_emoji_site_password"] = True
+        await query.message.reply_text(
+            "\n".join([
+                f"📞 الرقم المحدد: {target_number}",
+                "🔐 أرسل الآن كلمة سر الموقع لهذا الرقم للتحقق.",
+                "بعد التحقق سيطلب منك البوت الإيموجي وسيتم حفظه فورًا على الرقم.",
+            ])
+        )
         return
 
     if query.data == "refresh_home":
@@ -5692,6 +5956,62 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🔐 باسورد الرقم {requested_number}: {password_value}",
             reply_markup=build_main_keyboard(admin=is_admin(update)),
+        )
+        return
+
+    # تدفق جديد لتغيير الإيموجي: رقم مربوط مُختار + كلمة سر موقع للتحقق ثم الإيموجي
+    if context.user_data.get("awaiting_emoji_site_password"):
+        user = update.effective_user
+        if not user:
+            await update.message.reply_text("❌ تعذر تحديد المستخدم الحالي.")
+            return
+        target_number = normalize_phone_number(context.user_data.get("awaiting_emoji_number") or "")
+        site_password = text.strip()
+        if not target_number:
+            context.user_data.pop("awaiting_emoji_site_password", None)
+            context.user_data.pop("awaiting_emoji_number", None)
+            await update.message.reply_text(
+                "❌ تعذر تحديد الرقم، حاول مرة أخرى من البداية.",
+                reply_markup=build_main_keyboard(admin=is_admin(update)),
+            )
+            return
+        if not site_password:
+            await update.message.reply_text("❌ كلمة السر لا يمكن أن تكون فارغة.")
+            return
+        record = find_user_record_for_number(user.id, target_number)
+        if not record_belongs_to_user(record, user.id):
+            context.user_data.pop("awaiting_emoji_site_password", None)
+            context.user_data.pop("awaiting_emoji_number", None)
+            await update.message.reply_text(
+                "❌ هذا الرقم غير مربوط من حسابك داخل البوت.",
+                reply_markup=build_main_keyboard(admin=is_admin(update)),
+            )
+            return
+        try:
+            await asyncio.to_thread(
+                load_site_settings_sync,
+                user.id,
+                {
+                    "number": target_number,
+                    "site_password": site_password,
+                    "settings_url": TARGET_SETTINGS_PAGE_URL,
+                },
+            )
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ فشل التحقق من كلمة السر لهذا الرقم.\nالتفاصيل: {exc}"
+            )
+            return
+        store_manual_site_login(user, target_number, site_password, settings_url=TARGET_SETTINGS_PAGE_URL)
+        context.user_data.pop("awaiting_emoji_site_password", None)
+        context.user_data["awaiting_user_emoji"] = True
+        context.user_data["selected_emoji_number"] = target_number
+        await update.message.reply_text(
+            "\n".join([
+                f"✅ تم التحقق من الرقم: {target_number}",
+                "😀 الآن أرسل الإيموجي أو الإيموجيات (حتى 10) الذي تريد حفظه على هذا الرقم.",
+                "سيتم حفظه تلقائيًا وتطبيقه على الرقم فورًا.",
+            ])
         )
         return
 
@@ -7857,9 +8177,11 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("bot", bot))
     app.add_handler(CommandHandler("emoji", user_emoji_command))
     app.add_handler(CommandHandler("drf", drf_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("password", password_command))
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("dev", dev_command))
     app.add_handler(CallbackQueryHandler(handle_buttons))

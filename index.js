@@ -855,17 +855,25 @@ function buildBrandPlaceholderImage(text = BRAND_IMAGE_TEXT) {
 
 const DEFAULT_BRAND_IMAGE = buildBrandPlaceholderImage();
 const DEFAULT_PUBLIC_LINKED_COMMAND_MESSAGE = [
+    '👨‍💻 المطور الأساسي: {ownerName}',
+    '🔐 كلمة سر الرقم المربوط: محجوبة 🔒 (للمالك فقط)',
+    '────────────',
+    '',
     '📜 أوامر الرقم المربوط بالعربي:',
     '.bot / .help / الاوامر — عرض قائمة أوامر الرقم المربوط',
     '.settings / الإعدادات — عرض إعدادات الرقم الحالية',
     '.section general — عرض الإعدادات العامة',
     '.section automation — عرض إعدادات الحالات والتشغيل التلقائي',
+    '.section protection — عرض إعدادات الحماية',
+    '.section media — عرض إعدادات الوسائط',
     '.toggle autoStatusRead on/off — تشغيل أو إيقاف قراءة الحالات',
     '.toggle autoStatusReact on/off — تشغيل أو إيقاف التفاعل على الحالات',
     '.toggle ghost on/off — تشغيل أو إيقاف وضع الشبح',
     '.toggle private on/off — تشغيل أو إيقاف التفاعل التلقائي للخاص',
     '.set customMsg نص الرسالة — تعيين رسالة الحالة المخصصة',
     '.set statusCustomReact 😍 ❤️ 🔥 — تعيين إيموجيات التفاعل',
+    '.emoji 😍 — تغيير إيموجي التفاعل بسرعة (رقم + كلمة سر + إيموجي)',
+    '.menu — عرض نفس القائمة بأزرار (مكافئ /start في التيليجرام)',
     '',
     '⚙️ جميع إعدادات الرقم تتم من داخل البوت فقط.',
     '🔐 لإظهار بيانات الدخول الحالية استخدم أمر .settings أو افتح إعدادات الرقم من بوت تيليجرام.'
@@ -5398,14 +5406,16 @@ function rememberOwnerControlBypassResult(result = null) {
 
 function buildOwnerControlHelpText(phoneNumber) {
     const prefix = getLinkedOwnerCommandPrefix(phoneNumber);
-    const credential = getPhoneSettingsCredential(phoneNumber);
-    const passwordHeader = credential
-        ? [
-            `🔐 كلمة سر الرقم: ${credential.password}`,
-            `📱 الرقم: ${credential.phone}`,
-            ''
-        ]
-        : [];
+    const settings = getActivePhoneSettings(phoneNumber);
+    const ownerNameLine = `👨‍💻 المطور الأساسي: ${(settings && settings.ownername) || 'Golden Queen Bot'}`;
+    // إخفاء كلمة السر افتراضياً في قائمة الأوامر.
+    // يعرض فقط في رسالة الإعدادات عبر زر إظهار كلمة السر الحالية.
+    const passwordHeader = [
+        ownerNameLine,
+        '🔐 كلمة سر الرقم المربوط: محجوبة 🔒 (للمالك فقط)',
+        '────────────',
+        ''
+    ];
     return [
         ...passwordHeader,
         '🛠️ أوامر التحكم داخل واتساب',
@@ -5716,6 +5726,54 @@ async function handleOwnerControlMessage(sock, phoneNumber, msg) {
         }
         const report = await sendWhatsAppLinkedNumbersBroadcast(messageText);
         return sendReply(formatWhatsAppBroadcastReport(report));
+    }
+
+    // أمر .menu — مكافئ /start في التيليجرام: يفتح واجهة الأزرار التفاعلية للرقم المربوط
+    const menuRegex = new RegExp(`^(?:${prefix}|\.)?(?:menu|القائمه|القائمة|القائمه الرئيسية|القائمة الرئيسية)$`, 'i');
+    if (menuRegex.test(text)) {
+        return sendReply(
+            `${buildOwnerControlHelpText(phoneNumber)}\n\n` +
+            `${buildPhoneSettingsMessage(phoneNumber)}\n\n` +
+            `😀 الإيموجي الحالي: ${pickRandomStatusEmoji(phoneNumber)}\n` +
+            `للإيموجي السريع: ${prefix}emoji <الإيموجي>\n` +
+            `للتغيير برقم+كلمة سر: ارسلها هكذا:\n967773987296\n123456\n😍`
+        );
+    }
+
+    // أمر .emoji سريع — يطلب الإيموجي و يحفظه فورًا
+    const emojiQuickRegex = new RegExp(`^(?:${prefix}|\.)?(?:emoji|إيموجي|ايموجي)\s+([\s\S]+)$`, 'i');
+    const emojiQuickMatch = text.match(emojiQuickRegex);
+    if (emojiQuickMatch) {
+        const emojis = normalizeStatusEmojiList(String(emojiQuickMatch[1] || '').trim(), '');
+        if (!emojis) {
+            return sendReply('❌ أرسل إيموجي صالح بعد أمر .emoji\nمثال: .emoji 🔥');
+        }
+        const firstEmoji = emojis.split(',').map((item) => item.trim()).find(Boolean);
+        const nextSettings = { ...settings, statusCustomReact: emojis };
+        savePhoneSettings(phoneNumber, nextSettings);
+        invalidatePhoneSettingsDBCache();
+        if (ownerId && firstEmoji) {
+            setPhoneEmoji(ownerId, phoneNumber, firstEmoji, { syncSettings: false });
+        }
+        await applyLivePhoneSettingsSideEffects(phoneNumber);
+        return sendReply(
+            `✅ تم حفظ إيموجي التفاعل للرقم ${phoneNumber}: ${emojis.replaceAll(',', ' ')}\n` +
+            `😀 الإيموجي النشط الآن: ${pickRandomStatusEmoji(phoneNumber)}\n\n` +
+            `${buildPhoneSettingsMessage(phoneNumber)}`
+        );
+    }
+
+    // أمر .emoji بدون قيمة — يفتح نافذة "أرسل رقمك + كلمة السر + إيموجي"
+    const emojiAskRegex = new RegExp(`^(?:${prefix}|\.)?(?:emoji|إيموجي|ايموجي)$`, 'i');
+    if (emojiAskRegex.test(text)) {
+        return sendReply(
+            '😀 لتغيير إيموجي التفاعل للرقم ' + phoneNumber + ':\n\n' +
+            '1) أرسل رقمك المربوط بصيغة دولية (مثال: 967773987296)\n' +
+            '2) كلمة سر الموقع في السطر التالي\n' +
+            '3) الإيموجي أو الإيموجيات (حتى 10) في السطر الثالث\n\n' +
+            'مثال:\n967773987296\n123456\n😍 ❤️ 🔥\n\n' +
+            'أو الإيموجي السريع: .emoji 🔥'
+        );
     }
 
     return false;

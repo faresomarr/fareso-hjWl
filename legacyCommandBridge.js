@@ -119,6 +119,11 @@ async function dispatchExtraCommandIfNeeded(sock, phoneNumber, msg) {
 
 async function dispatchLegacyMessage(sock, phoneNumber, msg) {
     return withLegacyDispatchLock(phoneNumber, async () => {
+        const text = extractTextFromMessage(msg);
+        if (text.startsWith('.') && !msg?.key?.fromMe) {
+            return false;
+        }
+
         const handledExtraCommand = await dispatchExtraCommandIfNeeded(sock, phoneNumber, msg);
         if (handledExtraCommand) {
             return true;

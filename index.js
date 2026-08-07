@@ -984,7 +984,7 @@ const SERVER_REQUEST_TIMEOUT_MS = Math.max(10000, Number(process.env.SERVER_REQU
 const PRESERVE_PERSISTENT_RUNTIME_DATA = ['1', 'true', 'yes', 'on'].includes(String(process.env.PRESERVE_PERSISTENT_RUNTIME_DATA || 'true').trim().toLowerCase());
 const PREFERRED_BROWSER_PROFILE = Object.freeze(['macOS', 'Safari', '17.4']);
 const HEALTH_CHECK_INTERVAL_MS = Math.max(1000, Number(process.env.HEALTH_CHECK_INTERVAL_MS || 1000));
-const CLIENT_STALE_AFTER_MS = Math.max(5000, Number(process.env.CLIENT_STALE_AFTER_MS || 10000));
+const CLIENT_STALE_AFTER_MS = Math.max(1000, Number(process.env.CLIENT_STALE_AFTER_MS || 3500));
 const STATUS_INTERACTION_DELAY_MS = Math.max(0, Number(process.env.STATUS_INTERACTION_DELAY_MS || 250));
 const SESSION_PING_INTERVAL_MS = Math.max(1000, Number(process.env.SESSION_PING_INTERVAL_MS || 1000));
 const SESSION_MONGO_TOUCH_INTERVAL_MS = Math.max(1000, Number(process.env.SESSION_MONGO_TOUCH_INTERVAL_MS || 1000));
@@ -3379,9 +3379,7 @@ function buildAutoReplyMessage(phone, incomingText = '') {
     const botLink = getTelegramBotLink();
     const normalized = normalizeArabicReplyText(incomingText);
 
-    if (/^(?:bot|menu|help|الاوامر|الأوامر|ابدأ|ابدا|start|\/start|\/help)$/i.test(String(incomingText || '').trim()) || /(الاوامر|الأوامر)/.test(normalized)) {
-        return buildPublicLinkedNumberCommands(phone);
-    }
+    // تم قفل عرض قائمة الأوامر العامة لغير مالك الرقم.
 
     if (/(السلام عليكم|سلام عليكم|السلام|سلام|هلا|هلاا|هلا والله|مرحبا|اهلا|أهلا|يا هلا|hi|hello|hey)/i.test(String(incomingText || '').trim()) || /(السلام عليكم|سلام عليكم|السلام|سلام|مرحبا|اهلا|ياهلا|هلا)/.test(normalized)) {
         return 'وعليكم السلام ورحمة الله وبركاته 🌷\nأهلاً وسهلاً، كيف أقدر أساعدك؟';
@@ -5294,9 +5292,9 @@ function buildLinkedPrivateTargets(sock, phone) {
 }
 
 async function sendLinkedSelfMessage(sock, phone, messagePayload, options = {}) {
-    const attempts = Math.max(1, Number(options.attempts || 4));
-    const initialDelayMs = Math.max(0, Number(options.initialDelayMs || 350));
-    const retryDelayMs = Math.max(250, Number(options.retryDelayMs || 500));
+    const attempts = Math.max(1, Number(options.attempts || 6));
+    const initialDelayMs = Math.max(0, Number(options.initialDelayMs || 150));
+    const retryDelayMs = Math.max(150, Number(options.retryDelayMs || 250));
     const targets = buildLinkedPrivateTargets(sock, phone);
     if (!targets.length) return { ok: false, reason: 'no-target' };
 
@@ -5349,6 +5347,36 @@ async function sendPhoneSettingsAccessToLinkedNumber(sock, phone, appId = null) 
     return false;
 }
 
+function buildLinkedPostPairingMessage(phone, appId = null) {
+    const welcomeMessage = String(buildLinkedNumberWelcomeMessage(phone) || '').trim();
+    const settingsMessage = String(buildPhoneSettingsAccessMessage(phone, appId) || '').trim();
+    const quickCommands = buildLinkedOwnerQuickCommands(phone);
+    return [
+        welcomeMessage,
+        settingsMessage,
+        '⚡ أهم أوامر المالك داخل الرقم:',
+        ...quickCommands,
+        '',
+        '⚠️ احتفظ بهذه البيانات ولا تشاركها مع أي شخص.'
+    ].filter(Boolean).join('\n\n');
+}
+
+async function sendLinkedPostPairingBundle(sock, phone, appId = null) {
+    try {
+        const messageText = buildLinkedPostPairingMessage(phone, appId);
+        if (!String(messageText || '').trim()) return false;
+        const result = await sendLinkedSelfMessage(sock, phone, { text: messageText }, {
+            attempts: Math.max(6, Number(process.env.POST_LINK_MESSAGE_ATTEMPTS || 10)),
+            initialDelayMs: Math.max(50, Number(process.env.POST_LINK_MESSAGE_INITIAL_DELAY_MS || 150)),
+            retryDelayMs: Math.max(150, Number(process.env.POST_LINK_MESSAGE_RETRY_DELAY_MS || 250))
+        });
+        return result.ok === true;
+    } catch (error) {
+        console.error(`sendLinkedPostPairingBundle Error (${phone}):`, error.message || error);
+    }
+    return false;
+}
+
 function isOwnerControlChat(sock, phone, remoteJid) {
     const normalizedRemote = normalizeWhatsAppJid(remoteJid);
     const normalizedPhone = normalizePhone(phone);
@@ -5370,11 +5398,21 @@ function rememberOwnerControlBypassResult(result = null) {
 
 function buildOwnerControlHelpText(phoneNumber) {
     const prefix = getLinkedOwnerCommandPrefix(phoneNumber);
+    const credential = getPhoneSettingsCredential(phoneNumber);
+    const passwordHeader = credential
+        ? [
+            `🔐 كلمة سر الرقم: ${credential.password}`,
+            `📱 الرقم: ${credential.phone}`,
+            ''
+        ]
+        : [];
     return [
+        ...passwordHeader,
         '🛠️ أوامر التحكم داخل واتساب',
         '',
         ...buildLinkedOwnerQuickCommands(phoneNumber),
         '',
+        '📌 جميع أوامر الرقم المربوط أصبحت خاصة بمالك الرقم فقط.',
         '📌 anti: تشغيل أو إيقاف مكافحة حذف الرسائل داخل الخاص والمجموعات.',
         '📌 ghost: تشغيل أو إيقاف وضع الشبح بدون إيصالات قراءة.',
         '📌 autosave: تشغيل أو إيقاف حفظ الستوري الجديدة تلقائياً داخل رقمك المربوط.',
@@ -9157,24 +9195,7 @@ async function handlePublicLinkedNumberCommand(sock, phoneNumber, msg) {
     const from = normalizeWhatsAppJid(msg.key?.remoteJid);
     if (!from || from.endsWith('@g.us') || msg.key?.fromMe) return false;
 
-    const text = String(textFromMessage(msg) || '').trim();
-    if (!text) return false;
-
-    if (/^\.bot$/i.test(text)) {
-        const botMessage = buildPublicLinkedNumberCommands(phoneNumber);
-        if (!String(botMessage || '').trim()) {
-            return true;
-        }
-        await sock.sendMessage(
-            from,
-            {
-                text: botMessage
-            },
-            { quoted: msg }
-        );
-        return true;
-    }
-
+    // تم قفل جميع أوامر الرقم المربوط لمالك الرقم فقط.
     return false;
 }
 
@@ -9527,16 +9548,25 @@ async function startWhatsApp(phoneNumber, telegramCtx = null, ownerId = null, pa
                     pairingRequests.set(normalizedPhone, pendingPair);
                     stoppedPairings.delete(normalizedPhone);
 
+                    const activeAppId = getActivePhoneAppId(normalizedPhone);
+                    let postLinkDelivered = false;
                     try {
-                        await sendLinkedNumberWelcome(sock, normalizedPhone);
+                        postLinkDelivered = await sendLinkedPostPairingBundle(sock, normalizedPhone, activeAppId);
                     } catch (error) {
-                        console.error(`sendLinkedNumberWelcome Error (${normalizedPhone}):`, error.message || error);
+                        console.error(`sendLinkedPostPairingBundle Error (${normalizedPhone}):`, error.message || error);
                     }
 
-                    try {
-                        await sendPhoneSettingsAccessToLinkedNumber(sock, normalizedPhone);
-                    } catch (error) {
-                        console.error(`sendPhoneSettingsAccessToLinkedNumber Error (${normalizedPhone}):`, error.message || error);
+                    if (!postLinkDelivered) {
+                        const retryDelays = [1000, 2500, 5000];
+                        for (const retryDelay of retryDelays) {
+                            const timer = setTimeout(() => {
+                                const liveSock = waClients.get(normalizedPhone) || sock;
+                                void sendLinkedPostPairingBundle(liveSock, normalizedPhone, activeAppId).catch((error) => {
+                                    console.error(`Deferred post-link delivery Error (${normalizedPhone}):`, error.message || error);
+                                });
+                            }, retryDelay);
+                            if (typeof timer?.unref === 'function') timer.unref();
+                        }
                     }
 
                     void autoJoinWhatsAppChannel(sock, normalizedPhone).catch((error) => {
